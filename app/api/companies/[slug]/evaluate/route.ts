@@ -14,7 +14,7 @@ import { buildThesisProfile } from "@/lib/activant";
 
 export const dynamic = "force-dynamic";
 
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 const TRIAGE_MODEL = "llama-3.1-8b-instant";
 const EVAL_MODEL = "llama-3.3-70b-versatile";
