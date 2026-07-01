@@ -1,6 +1,6 @@
 import { completeText } from "./groq";
-import { getCompaniesByBatch, getEvaluationsByBatch, searchCompanies, upsertCompany } from "./db";
-import { fetchMeta, fetchBatchCompanies, normalizeBatchKey } from "./yc";
+import { getCompaniesByBatch, getEvaluationsByBatch, searchCompanies } from "./db";
+import { fetchMeta, normalizeBatchKey } from "./yc";
 import type { Company, Evaluation } from "./types";
 
 const QA_MODEL = "llama-3.3-70b-versatile";
@@ -18,11 +18,11 @@ async function ensureBatchLoaded(batchKey: string): Promise<{ name: string; comp
   const info = meta.batches[batchKey];
   if (!info) return null;
 
-  let companies = await getCompaniesByBatch(info.name);
-  if (companies.length === 0) {
-    companies = await fetchBatchCompanies(info.api);
-    for (const c of companies) await upsertCompany(c);
-  }
+  // Read ONLY from the database — never fetch/enrich a batch live here. A
+  // question shouldn't trigger loading 100+ companies from the network, which
+  // is what caused request timeouts. If the batch isn't in the DB yet, we
+  // return it as empty so the caller can tell the user to process it first.
+  const companies = await getCompaniesByBatch(info.name);
   return { name: info.name, companies };
 }
 
@@ -58,10 +58,30 @@ export async function answerQuestion(question: string): Promise<string> {
       contextParts.push(`Batch "${key}" was not found in YC's directory.`);
       continue;
     }
+    if (loaded.companies.length === 0) {
+      contextParts.push(
+        `Batch ${loaded.name} has not been processed yet in this app, so there is no ` +
+        `data or evaluations for it. Tell the user to go to the dashboard and click ` +
+        `"Process" on ${loaded.name} first, then ask again.`
+      );
+      continue;
+    }
     const evaluations = await getEvaluationsByBatch(loaded.name);
     const evalBySlug = Object.fromEntries(evaluations.map((e) => [e.company_slug, e]));
-    const lines = loaded.companies.map((c) => summarizeCompany(c, evalBySlug[c.slug]));
-    contextParts.push(`Batch ${loaded.name} (${loaded.companies.length} companies):\n${lines.join("\n")}`);
+
+    // Put evaluated companies first, sorted by their best score, so questions
+    // about "best/top" companies get the most relevant rows even if the list
+    // is long. Cap the number of rows to keep the prompt (and response) fast.
+    const sorted = [...loaded.companies].sort((a, b) => {
+      const ea = evalBySlug[a.slug];
+      const eb = evalBySlug[b.slug];
+      const sa = ea ? Math.max(ea.quality_score, ea.thesis_score) : -1;
+      const sb = eb ? Math.max(eb.quality_score, eb.thesis_score) : -1;
+      return sb - sa;
+    });
+    const lines = sorted.slice(0, 40).map((c) => summarizeCompany(c, evalBySlug[c.slug]));
+    const note = sorted.length > 40 ? `\n(showing top 40 of ${sorted.length})` : "";
+    contextParts.push(`Batch ${loaded.name} (${loaded.companies.length} companies):\n${lines.join("\n")}${note}`);
   }
 
   // 2. Keyword search for specific company mentions (skip if a batch already covered it).
